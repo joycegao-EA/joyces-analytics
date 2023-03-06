@@ -55,4 +55,6 @@ where
     first_received.state='RECEIVED' and --I wanted to put this in first_received too actually
     all_pre_bb.state='BOUNCED_BACK' --I wanted to put this in all_pre_bb too 
 group by 1
-limit 3;
+limit 3; --so that we won't kill the system while running 1 whole year's worth of data
+
+--Side note: the last step is to group data into months!
