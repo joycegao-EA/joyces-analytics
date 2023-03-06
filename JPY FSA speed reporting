@@ -57,4 +57,4 @@ where
 group by 1
 limit 3; --so that we won't kill the system while running 1 whole year's worth of data
 
---Side note: the last step is to group data into months!
+--Side note: the last step is to group data into months! But lemme get the code upstairs right first
