@@ -1,0 +1,58 @@
+--Step 0: extract fJPY payments dating from 1 Jan 2022 JST
+--Obtain current state info here too
+with fjpy_transfers as (
+    select
+        TRANSFER_ID,
+        CURRENT_STATE, --the current_state col not the most updated? This one sus 291212432
+        CURRENT_STATE_TIME
+    from
+        estimator.TRANSFER_LIFECYCLE
+    where
+        SOURCE_CURRENCY='JPY' and
+        RECEIVE_TIME > '2021-12-31 14:59:59'
+),
+
+
+--Step 1: Pull out all 1st received timestamps
+first_received as (
+    select distinct
+        transfer_id,
+        state,
+        first_value(date_created) over (partition by transfer_id order by date_created asc) as first_received_timestamp
+    from
+        transfer.transfer_state
+),
+
+--Step 2: Pull out BB related transfers. These are [state] --> BOUNCED_BACK transfers
+--Use transfer_id=577530489 for testing, but take care to remove the source_currency='JPY' in fjpy_transfers, cuz this is a EUR-SGD transfer from Joyce's account
+all_pre_bb as (
+    select
+        transfer_id,
+        lag(state) over (partition by transfer_id order by date_created asc) as lag_state,
+        lag(date_created) over (partition by transfer_id order by date_created asc) as lag_time, --gonna minus this with received timestamp
+        state,
+        date_created,
+        timestampdiff(second,lag_time,date_created) as time_funds_left_wise_sec
+    from
+        transfer.transfer_state
+)
+
+--Step 3: Putting everything together
+select
+    fjpy_transfers.transfer_id,
+    first_received_timestamp,
+    current_state_time,
+    sum(time_funds_left_wise_sec) as total_time_funds_left_wise_sec,
+    timestampdiff(second,first_received_timestamp, current_state_time) as received_till_end_time_sec,
+    received_till_end_time_sec - total_time_funds_left_wise_sec  as time_wise_has_funds_sec
+from
+    fjpy_transfers
+        left join first_received
+            on fjpy_transfers.TRANSFER_ID=first_received.TRANSFER_ID
+        left join all_pre_bb
+            on first_received.TRANSFER_ID=all_pre_bb.TRANSFER_ID
+where
+    first_received.state='RECEIVED' and --I wanted to put this in first_received too actually
+    all_pre_bb.state='BOUNCED_BACK' --I wanted to put this in all_pre_bb too 
+group by 1
+limit 3;
