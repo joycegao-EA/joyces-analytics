@@ -1,0 +1,95 @@
+--Note: in order to obtain reliable duration of LSM, run the below query
+--We'll need this info for the actual query which helps us with contacts
+select
+    VIRTUALBALANCE,
+    CASHBALANCE,
+    TRANSFERSDELAYED,
+    AMOUNTDELAYED,
+    CREATEDTIMESTAMP,
+    acc.NAME,
+    acc.ID as NINJAS_ID
+from
+    liquidity.ACCOUNT_STATEMENT_SNAPSHOT ass
+        join liquidity.ACCOUNT acc
+             on ass.ACCOUNTID=acc.ID
+where
+        NINJAS_ID=1202 and --replace with desired payout partner's Ninjas ID
+        CREATEDTIMESTAMP  > '2023-03-04 22:59:59' and --replace with rough timing of when did LSM kick in: this requires ops knowledge
+        CREATEDTIMESTAMP < '2023-03-06 05:00:00' --and rough timing of when did LSM end: this requires ops knowledge
+order by CREATEDTIMESTAMP desc;
+
+-----------------------------------------------------------THE ACTUAL CONTACT AND TRANSFER SIZING------------------------------------------------------
+
+--pulling full list of affected txns
+with lsm_transfers as (
+    select distinct
+        sla.TRANSFER_ID, --w distinct it's 4781, wo distinct it's 9562
+        ras.INVOICE_VALUE_GBP,
+        tl.READY_FOR_CONVERSION_TIME as RFC_TIME,
+        tl.MATCH_TIME as MATCH_TIME,
+        tp.PAYOUT_PARTNER,
+        instant.FLAG_PAYOUT_INSTANT as instant_payout_partner
+    from
+        REPORTS.REPORT_LIQUIDITY_SLA_STATUS sla
+            join estimator.TRANSFER_PLAN tp
+                 on sla.TRANSFER_ID=tp.TRANSFER_ID
+            join estimator.TRANSFER_LIFECYCLE tl
+                 on tp.TRANSFER_ID=tl.TRANSFER_ID
+            join reports.REPORT_ACTION_STEP ras
+                on tl.TRANSFER_ID=ras.REQUEST_ID
+            join reports.lookup_instant_payments instant
+                on ras.REQUEST_ID=instant.REQUEST_ID
+    where
+            sla.liquidity_shortage_trigger='LIQUIDITY_SHORTAGE_COMPONENT' and
+            tp.PAYOUT_PARTNER='JPMorganMyrPayoutPartner' and --edit partner to study specific partner
+            tl.READY_FOR_CONVERSION_TIME > '2023-03-05 06:00:00' and --edit timestamp here for start of LSM kickin
+            tl.READY_FOR_CONVERSION_TIME < '2023-03-06 04:00:00' --and edit timestamp here for end of LSM
+),
+
+--pull out contacts: we are looking at transfer_status
+--interesting...contact count is rly rly low...but then again this is just for JPM MYR over weekend hmm
+--quick insights: ppl are contacting when transfer is matched instead
+--the notif made them realise that we matched their funds real late
+contacts as (
+    select
+        CONTACT__KEY,
+        CONTACT__CREATED_AT_TS,
+        CONTACT__TRANSFER_ID_FINAL,
+        ZENDESK_TICKET__ID,
+        USER__ID,
+        PROFILE__ID,
+        CONTACT__LAST_CONTACT_REASON_TIER_ONE,
+        CONTACT__LAST_CONTACT_REASON_TIER_TWO,
+        CONTACT__TRANSFER_STATE_AT_TIME_OF_INITIAL_CONTACT,
+        CONTACT__TRANSFER_STATE_AT_TIME_OF_CONTACT,
+        CONTACT__FINAL_TRANSFER_STATE,
+        CONTACT__FIRST_QUICK_REPLY_IN_CASE_TIER_1,
+        CONTACT__FIRST_QUICK_REPLY_IN_CASE_TIER_2,
+        CONTACT__IS_FOR_HAT_TEAM,
+        TRANSFER__PAYOUT_PARTNER
+    from
+        RPT_CS_DATA.ANALYTICAL_CONTACT_ATTRIBUTION__CONTACTS contacts
+    where
+        CONTACT__TRANSFER_ID_FINAL in (select distinct transfer_id from lsm_transfers)
+        and CONTACT__LAST_CONTACT_REASON_TIER_ONE in ('transfer_status', 'edit/cancel/refund_a_transfer')
+    order by CONTACT__CREATED_AT_TS desc
+)
+
+--calculate contact rate: putting everything tgt
+select
+    case
+        when lsm_transfers.invoice_value_gbp > 140000 then 'HAT'
+        else 'non-HAT'
+    end as HAT,
+    case
+        when instant_payout_partner=1 then 'instant payout partner'
+        when instant_payout_partner=0 then 'non-instant payout partner'
+        else 'null'
+    end as instant_payout_partner,
+    count(lsm_transfers.TRANSFER_ID) as delayed_transfers,
+    count(contacts.contact__key) as contact_count,
+    contact_count / delayed_transfers as contact_rate
+from
+    lsm_transfers left join contacts
+        on lsm_transfers.TRANSFER_ID=contacts.CONTACT__TRANSFER_ID_FINAL
+group by 1,2;
